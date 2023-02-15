@@ -37,7 +37,7 @@ private:
 
 	vk::Extent2D extent;
 
-	usize frame_count = 3;
+	constexpr static usize FRAME_COUNT = 2;
 
 	vk::SwapchainKHR swapchain;
 	u32 current_frame {};
@@ -45,14 +45,14 @@ private:
 	std::vector<vk::Image> images {};
 	std::vector<vk::ImageView> image_views {};
 	vk::CommandPool graphics_cmd_pool;
-	std::vector<vk::CommandBuffer> graphics_cmd_buffers {};
+	vk::CommandBuffer graphics_cmd_buffers[FRAME_COUNT] {};
 	vk::CommandPool transfer_cmd_pool;
 	vk::CommandBuffer transfer_cmd_buffer;
 	vk::SurfaceFormatKHR format;
 	vk::PresentModeKHR mode;
-	std::vector<vk::Semaphore> image_acquired_semaphores {};
-	std::vector<vk::Semaphore> render_finished_semaphores {};
-	std::vector<vk::Fence> submit_finished_fences {};
+	vk::Semaphore image_acquired_semaphores[FRAME_COUNT] {};
+	vk::Semaphore render_finished_semaphores[FRAME_COUNT] {};
+	vk::Fence submit_finished_fences[FRAME_COUNT] {};
 
 	vk::ClearColorValue clear_color {};
 };

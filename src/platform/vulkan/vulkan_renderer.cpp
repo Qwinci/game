@@ -208,7 +208,7 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 
 	auto caps = phys_device.getSurfaceCapabilitiesKHR(surface);
 
-	u32 image_count = frame_count;
+	u32 image_count = FRAME_COUNT;
 	if (image_count < caps.minImageCount) {
 		image_count = caps.minImageCount;
 	}
@@ -216,10 +216,8 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 		image_count = caps.maxImageCount;
 	}
 
-	extent.width = std::max(extent.width, caps.minImageExtent.width);
-	extent.width = std::min(extent.width, caps.maxImageExtent.width);
-	extent.height = std::max(extent.height, caps.minImageExtent.height);
-	extent.height = std::min(extent.height, caps.maxImageExtent.height);
+	extent.width = std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+	extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
 
 	vk::SwapchainCreateInfoKHR swapchain_info {
 		.surface = surface,
@@ -230,12 +228,10 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 		.imageArrayLayers = 1,
 		.imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
 		.imageSharingMode = vk::SharingMode::eExclusive,
-		.queueFamilyIndexCount = 1,
-		.pQueueFamilyIndices = &graphics_family,
 		.preTransform = vk::SurfaceTransformFlagBitsKHR::eIdentity,
 		.compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
 		.presentMode = mode,
-		.clipped = VK_FALSE
+		.clipped = VK_TRUE
 	};
 
 	vk::ImageViewCreateInfo image_view_info {
@@ -252,8 +248,6 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 
 	swapchain = device.createSwapchainKHR(swapchain_info);
 	images = device.getSwapchainImagesKHR(swapchain);
-	frame_count = images.size();
-	logger->log("vulkan", std::string("using ") + std::to_string(frame_count) + " images");
 	for (auto& image : images) {
 		image_view_info.image = image;
 		image_views.push_back(device.createImageView(image_view_info));
@@ -276,13 +270,8 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 		.commandBufferCount = 1
 	};
 
-	graphics_cmd_buffers.resize(frame_count);
-	image_acquired_semaphores.resize(frame_count);
-	render_finished_semaphores.resize(frame_count);
-	submit_finished_fences.resize(frame_count);
-
-	for (auto& graphics_cmd_buffer : graphics_cmd_buffers) {
-		graphics_cmd_buffer = device.allocateCommandBuffers(cmd_buffer_info)[0];
+	for (auto& cmd_buf : graphics_cmd_buffers) {
+		cmd_buf = device.allocateCommandBuffers(cmd_buffer_info)[0];
 	}
 
 	cmd_buffer_info.commandPool = transfer_cmd_pool;
@@ -305,6 +294,52 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 	for (auto& fence : submit_finished_fences) {
 		fence = device.createFence(fence_info);
 	}
+
+	vk::ImageMemoryBarrier barrier {
+		.srcAccessMask = vk::AccessFlagBits::eNone,
+		.dstAccessMask = vk::AccessFlagBits::eNone,
+		.oldLayout = vk::ImageLayout::eUndefined,
+		.newLayout = vk::ImageLayout::ePresentSrcKHR,
+		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.subresourceRange {
+			.aspectMask = vk::ImageAspectFlagBits::eColor,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		}
+	};
+
+	vk::CommandBufferBeginInfo begin_info {
+		.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit
+	};
+
+	graphics_cmd_buffers[0].begin(begin_info);
+
+	for (auto& image : images) {
+		barrier.image = image;
+
+		graphics_cmd_buffers[0].pipelineBarrier(
+				vk::PipelineStageFlagBits::eAllGraphics,
+				vk::PipelineStageFlagBits::eAllGraphics,
+				{},
+				{},
+				{},
+				{barrier}
+				);
+	}
+
+	graphics_cmd_buffers[0].end();
+
+	vk::SubmitInfo submit_info {
+		.commandBufferCount = 1,
+		.pCommandBuffers = &graphics_cmd_buffers[0],
+	};
+
+	graphics_queue.submit({submit_info});
+
+	graphics_queue.waitIdle();
 
 	logger->log("vulkan", "renderer init done");
 }
@@ -336,7 +371,7 @@ void VulkanRenderer::begin(bool clear) {
 
 	auto res = device.acquireNextImageKHR(swapchain, UINT64_MAX, image_acquired_semaphores[current_frame]);
 	if (res.result == vk::Result::eErrorOutOfDateKHR || res.result == vk::Result::eSuboptimalKHR) {
-		logger->log("vulkan", "using suboptimal or out of date swapchain", LogLevel::Warn);
+		//logger->log("vulkan", "using suboptimal or out of date swapchain", LogLevel::Warn);
 	}
 	print_time_between_fn("acquireNextImageKHR");
 	image_index = res.value;
@@ -365,18 +400,19 @@ void VulkanRenderer::begin(bool clear) {
 	graphics_cmd_buffers[current_frame].begin(cmd_begin_info);
 	print_time_between_fn("cmd_buf_begin");
 
-	const vk::ImageMemoryBarrier image_start_barrier {
-			.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-			.oldLayout = vk::ImageLayout::eUndefined,
-			.newLayout = vk::ImageLayout::eColorAttachmentOptimal,
-			.image = images[image_index],
-			.subresourceRange {
-					.aspectMask = vk::ImageAspectFlagBits::eColor,
-					.baseMipLevel = 0,
-					.levelCount = 1,
-					.baseArrayLayer = 0,
-					.layerCount = 1
-			}
+	/*const vk::ImageMemoryBarrier image_start_barrier {
+		.srcAccessMask = vk::AccessFlagBits::e
+		.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+		.oldLayout = vk::ImageLayout::eUndefined,
+		.newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+		.image = images[image_index],
+		.subresourceRange {
+				.aspectMask = vk::ImageAspectFlagBits::eColor,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+		}
 	};
 
 	graphics_cmd_buffers[current_frame].pipelineBarrier(
@@ -387,7 +423,7 @@ void VulkanRenderer::begin(bool clear) {
 			{},
 			{image_start_barrier}
 	);
-	print_time_between_fn("pipelineBarrier (start)");
+	print_time_between_fn("pipelineBarrier (start)");*/
 
 	//graphics_cmd_buffers[current_frame].beginRendering(render_info);
 	//print_time_between_fn("beginRendering");
@@ -398,9 +434,12 @@ void VulkanRenderer::finish() {
 	//print_time_between_fn("endRendering");
 
 	const vk::ImageMemoryBarrier image_barrier {
-		.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-		.oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+		.srcAccessMask = vk::AccessFlagBits::eNone,
+		.dstAccessMask = vk::AccessFlagBits::eNone,
+		.oldLayout = vk::ImageLayout::eUndefined,
 		.newLayout = vk::ImageLayout::ePresentSrcKHR,
+		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = images[image_index],
 		.subresourceRange {
 			.aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -411,14 +450,14 @@ void VulkanRenderer::finish() {
 		}
 	};
 
-	graphics_cmd_buffers[current_frame].pipelineBarrier(
+	/*graphics_cmd_buffers[current_frame].pipelineBarrier(
 			vk::PipelineStageFlagBits::eColorAttachmentOutput,
 			vk::PipelineStageFlagBits::eBottomOfPipe,
 			{},
 			{},
 			{},
 			{image_barrier});
-	print_time_between_fn("pipelineBarrier (end)");
+	print_time_between_fn("pipelineBarrier (end)");*/
 
 	graphics_cmd_buffers[current_frame].end();
 	print_time_between_fn("cmd_buf_end");
@@ -443,16 +482,16 @@ void VulkanRenderer::finish() {
 		.pWaitSemaphores = &render_finished_semaphores[current_frame],
 		.swapchainCount = 1,
 		.pSwapchains = &swapchain,
-		.pImageIndices = &image_index,
-		.pResults = nullptr
+		.pImageIndices = &image_index
 	};
 
 	if (graphics_queue.presentKHR(present_info) != vk::Result::eSuccess) {
 		logger->log("vulkan", "failed to present image", LogLevel::Warn);
 	}
+
 	print_time_between_fn("presentKHR");
 
-	current_frame = (current_frame + 1) % frame_count;
+	current_frame = (current_frame + 1) % FRAME_COUNT;
 }
 
 VulkanRenderer::~VulkanRenderer() {
