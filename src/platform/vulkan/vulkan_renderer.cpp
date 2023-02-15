@@ -3,6 +3,7 @@
 #include "window.hpp"
 #include <SDL_vulkan.h>
 #include <unordered_set>
+#include <chrono>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -207,7 +208,10 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 
 	auto caps = phys_device.getSurfaceCapabilitiesKHR(surface);
 
-	u32 image_count = caps.minImageCount + 1;
+	u32 image_count = frame_count;
+	if (image_count < caps.minImageCount) {
+		image_count = caps.minImageCount;
+	}
 	if (caps.maxImageCount && image_count > caps.maxImageCount) {
 		image_count = caps.maxImageCount;
 	}
@@ -246,13 +250,13 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 		}
 	};
 
-	for (usize i = 0; i < FRAME_COUNT; ++i) {
-		swapchains[i] = device.createSwapchainKHR(swapchain_info);
-		images[i] = device.getSwapchainImagesKHR(swapchains[i]);
-		for (auto& image : images[i]) {
-			image_view_info.image = image;
-			image_views[i].push_back(device.createImageView(image_view_info));
-		}
+	swapchain = device.createSwapchainKHR(swapchain_info);
+	images = device.getSwapchainImagesKHR(swapchain);
+	frame_count = images.size();
+	logger->log("vulkan", std::string("using ") + std::to_string(frame_count) + " images");
+	for (auto& image : images) {
+		image_view_info.image = image;
+		image_views.push_back(device.createImageView(image_view_info));
 	}
 
 	extent = {window->width, window->height};
@@ -271,6 +275,11 @@ VulkanRenderer::VulkanRenderer(Window* window, Logger* logger) : window {window}
 		.level = vk::CommandBufferLevel::ePrimary,
 		.commandBufferCount = 1
 	};
+
+	graphics_cmd_buffers.resize(frame_count);
+	image_acquired_semaphores.resize(frame_count);
+	render_finished_semaphores.resize(frame_count);
+	submit_finished_fences.resize(frame_count);
 
 	for (auto& graphics_cmd_buffer : graphics_cmd_buffers) {
 		graphics_cmd_buffer = device.allocateCommandBuffers(cmd_buffer_info)[0];
@@ -308,6 +317,10 @@ void VulkanRenderer::set_clear_color(f32 r, f32 g, f32 b, f32 a) {
 	clear_color = vk::ClearColorValue {{{r, g, b, a}}};
 }
 
+#include <iostream>
+
+namespace chrono = std::chrono;
+
 void VulkanRenderer::begin(bool clear) {
 	vk::CommandBufferBeginInfo cmd_begin_info {
 			.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit
@@ -316,16 +329,20 @@ void VulkanRenderer::begin(bool clear) {
 	if (device.waitForFences({submit_finished_fences[current_frame]}, VK_TRUE, UINT64_MAX) != vk::Result::eSuccess) {
 		logger->log("vulkan", "failed to wait for submit fence", LogLevel::Warn);
 	}
-	device.resetFences({submit_finished_fences[current_frame]});
+	print_time_between_fn("waitForFences");
 
-	auto res = device.acquireNextImageKHR(swapchains[current_frame], UINT64_MAX, image_acquired_semaphores[current_frame]);
+	device.resetFences({submit_finished_fences[current_frame]});
+	print_time_between_fn("resetFences");
+
+	auto res = device.acquireNextImageKHR(swapchain, UINT64_MAX, image_acquired_semaphores[current_frame]);
 	if (res.result == vk::Result::eErrorOutOfDateKHR || res.result == vk::Result::eSuboptimalKHR) {
 		logger->log("vulkan", "using suboptimal or out of date swapchain", LogLevel::Warn);
 	}
+	print_time_between_fn("acquireNextImageKHR");
 	image_index = res.value;
 
 	vk::RenderingAttachmentInfo color_attachment_info {
-			.imageView = image_views[current_frame][image_index],
+			.imageView = image_views[image_index],
 			.imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
 			.loadOp = vk::AttachmentLoadOp::eClear,
 			.storeOp = vk::AttachmentStoreOp::eStore,
@@ -341,14 +358,18 @@ void VulkanRenderer::begin(bool clear) {
 			.pColorAttachments = &color_attachment_info
 	};
 
+
 	graphics_cmd_buffers[current_frame].reset();
+	print_time_between_fn("cmd_buf_reset");
+
 	graphics_cmd_buffers[current_frame].begin(cmd_begin_info);
+	print_time_between_fn("cmd_buf_begin");
 
 	const vk::ImageMemoryBarrier image_start_barrier {
 			.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
 			.oldLayout = vk::ImageLayout::eUndefined,
 			.newLayout = vk::ImageLayout::eColorAttachmentOptimal,
-			.image = images[current_frame][image_index],
+			.image = images[image_index],
 			.subresourceRange {
 					.aspectMask = vk::ImageAspectFlagBits::eColor,
 					.baseMipLevel = 0,
@@ -366,18 +387,21 @@ void VulkanRenderer::begin(bool clear) {
 			{},
 			{image_start_barrier}
 	);
+	print_time_between_fn("pipelineBarrier (start)");
 
-	graphics_cmd_buffers[current_frame].beginRendering(render_info);
+	//graphics_cmd_buffers[current_frame].beginRendering(render_info);
+	//print_time_between_fn("beginRendering");
 }
 
 void VulkanRenderer::finish() {
-	graphics_cmd_buffers[current_frame].endRendering();
+	//graphics_cmd_buffers[current_frame].endRendering();
+	//print_time_between_fn("endRendering");
 
 	const vk::ImageMemoryBarrier image_barrier {
 		.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
 		.oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
 		.newLayout = vk::ImageLayout::ePresentSrcKHR,
-		.image = images[current_frame][image_index],
+		.image = images[image_index],
 		.subresourceRange {
 			.aspectMask = vk::ImageAspectFlagBits::eColor,
 			.baseMipLevel = 0,
@@ -394,8 +418,10 @@ void VulkanRenderer::finish() {
 			{},
 			{},
 			{image_barrier});
+	print_time_between_fn("pipelineBarrier (end)");
 
 	graphics_cmd_buffers[current_frame].end();
+	print_time_between_fn("cmd_buf_end");
 
 	vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
 
@@ -410,12 +436,13 @@ void VulkanRenderer::finish() {
 	};
 
 	graphics_queue.submit(submit_info, submit_finished_fences[current_frame]);
+	print_time_between_fn("submit");
 
 	vk::PresentInfoKHR present_info {
 		.waitSemaphoreCount = 1,
 		.pWaitSemaphores = &render_finished_semaphores[current_frame],
 		.swapchainCount = 1,
-		.pSwapchains = &swapchains[current_frame],
+		.pSwapchains = &swapchain,
 		.pImageIndices = &image_index,
 		.pResults = nullptr
 	};
@@ -423,13 +450,9 @@ void VulkanRenderer::finish() {
 	if (graphics_queue.presentKHR(present_info) != vk::Result::eSuccess) {
 		logger->log("vulkan", "failed to present image", LogLevel::Warn);
 	}
+	print_time_between_fn("presentKHR");
 
-	if (current_frame < FRAME_COUNT - 1) {
-		++current_frame;
-	}
-	else {
-		current_frame = 0;
-	}
+	current_frame = (current_frame + 1) % frame_count;
 }
 
 VulkanRenderer::~VulkanRenderer() {
@@ -449,13 +472,22 @@ VulkanRenderer::~VulkanRenderer() {
 
 	device.destroy(graphics_cmd_pool);
 	device.destroy(transfer_cmd_pool);
-	for (usize i = 0; i < FRAME_COUNT; ++i) {
-		for (auto& view : image_views[i]) {
-			device.destroy(view);
-		}
-		device.destroy(swapchains[i]);
+	for (auto& view : image_views) {
+		device.destroy(view);
 	}
+	device.destroy(swapchain);
 	device.destroy();
 	instance.destroy(surface);
 	instance.destroy();
+}
+
+void VulkanRenderer::print_time_between_fn(std::string_view fn) {
+	auto now = chrono::high_resolution_clock::now();
+	auto diff = chrono::duration_cast<chrono::milliseconds>(now - last_fn_end);
+	last_fn_end = now;
+	if (diff.count() > 0) {
+		logger->log("vulkan", std::string("time between ")
+		+ last_fn_name + " and " + fn.data() + " is " + std::to_string(diff.count()) + "ms");
+	}
+	last_fn_name = fn;
 }

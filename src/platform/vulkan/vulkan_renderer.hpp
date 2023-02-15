@@ -6,6 +6,7 @@ class GpuMesh;
 struct Transform;
 class Logger;
 class Window;
+#include <chrono>
 
 class VulkanRenderer {
 public:
@@ -17,6 +18,10 @@ public:
 	void begin(bool clear);
 	void finish();
 private:
+	void print_time_between_fn(std::string_view fn);
+	std::string last_fn_name {};
+	std::chrono::high_resolution_clock::time_point last_fn_end {};
+
 	Window* window;
 	Logger* logger;
 
@@ -32,22 +37,22 @@ private:
 
 	vk::Extent2D extent;
 
-	static constexpr usize FRAME_COUNT = 3;
+	usize frame_count = 3;
 
-	vk::SwapchainKHR swapchains[FRAME_COUNT];
+	vk::SwapchainKHR swapchain;
 	u32 current_frame {};
 	u32 image_index {};
-	std::vector<vk::Image> images[FRAME_COUNT] {};
-	std::vector<vk::ImageView> image_views[FRAME_COUNT] {};
+	std::vector<vk::Image> images {};
+	std::vector<vk::ImageView> image_views {};
 	vk::CommandPool graphics_cmd_pool;
-	vk::CommandBuffer graphics_cmd_buffers[FRAME_COUNT];
+	std::vector<vk::CommandBuffer> graphics_cmd_buffers {};
 	vk::CommandPool transfer_cmd_pool;
 	vk::CommandBuffer transfer_cmd_buffer;
 	vk::SurfaceFormatKHR format;
 	vk::PresentModeKHR mode;
-	vk::Semaphore image_acquired_semaphores[FRAME_COUNT];
-	vk::Semaphore render_finished_semaphores[FRAME_COUNT];
-	vk::Fence submit_finished_fences[FRAME_COUNT];
+	std::vector<vk::Semaphore> image_acquired_semaphores {};
+	std::vector<vk::Semaphore> render_finished_semaphores {};
+	std::vector<vk::Fence> submit_finished_fences {};
 
 	vk::ClearColorValue clear_color {};
 };
